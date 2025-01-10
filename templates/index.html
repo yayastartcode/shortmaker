@@ -200,10 +200,11 @@
             generateBtn.disabled = true;
             progress.classList.remove('hidden');
             downloadInfo.classList.add('hidden');
-            progressText.textContent = 'Generating video...';
-            progressBar.style.width = '50%';
+            progressText.textContent = 'Starting video generation...';
+            progressBar.style.width = '0%';
 
             try {
+                // Start video generation
                 const response = await fetch('/upload', {
                     method: 'POST',
                     body: formData
@@ -212,38 +213,64 @@
                 const data = await response.json();
                 
                 if (data.success) {
-                    progressBar.style.width = '100%';
-                    progressText.textContent = 'Video generated successfully!';
-                    
-                    // Show download info
-                    downloadInfo.classList.remove('hidden');
-                    downloadLink.href = data.video_path;
-                    expiresIn.textContent = Math.floor(data.expires_in / 60);
-                    expiresAt.textContent = data.expires_at;
-                    
-                    // Start countdown
-                    let timeLeft = data.expires_in;
-                    const countdownInterval = setInterval(() => {
-                        timeLeft -= 60;
-                        if (timeLeft <= 0) {
-                            clearInterval(countdownInterval);
-                            downloadInfo.classList.add('hidden');
-                        } else {
-                            expiresIn.textContent = Math.floor(timeLeft / 60);
+                    // Poll for video status
+                    const videoId = data.video_id;
+                    const pollInterval = setInterval(async () => {
+                        try {
+                            const statusResponse = await fetch(`/status/${videoId}`);
+                            const statusData = await statusResponse.json();
+                            
+                            if (statusData.status === 'completed') {
+                                clearInterval(pollInterval);
+                                progressBar.style.width = '100%';
+                                progressText.textContent = 'Video generated successfully!';
+                                
+                                // Show download info
+                                downloadInfo.classList.remove('hidden');
+                                downloadLink.href = statusData.video_path;
+                                expiresIn.textContent = Math.floor(statusData.expires_in / 60);
+                                expiresAt.textContent = statusData.expires_at;
+                                
+                                // Start countdown
+                                let timeLeft = statusData.expires_in;
+                                const countdownInterval = setInterval(() => {
+                                    timeLeft -= 60;
+                                    if (timeLeft <= 0) {
+                                        clearInterval(countdownInterval);
+                                        downloadInfo.classList.add('hidden');
+                                    } else {
+                                        expiresIn.textContent = Math.floor(timeLeft / 60);
+                                    }
+                                }, 60000);
+                            } else if (statusData.status === 'error') {
+                                clearInterval(pollInterval);
+                                throw new Error(statusData.error);
+                            } else {
+                                // Update progress
+                                progressBar.style.width = `${statusData.progress}%`;
+                                progressText.textContent = `Generating video... ${statusData.progress}%`;
+                            }
+                        } catch (error) {
+                            clearInterval(pollInterval);
+                            throw error;
                         }
-                    }, 60000); // Update every minute
+                    }, 1000); // Check every second
+                    
+                    // Set timeout to stop polling after 2 minutes
+                    setTimeout(() => {
+                        clearInterval(pollInterval);
+                        if (!downloadInfo.classList.contains('hidden')) return; // Already completed
+                        throw new Error('Video generation timed out. Please try again.');
+                    }, 120000);
+                    
                 } else {
-                    throw new Error(data.error || 'Failed to generate video');
+                    throw new Error(data.error || 'Failed to start video generation');
                 }
             } catch (error) {
                 progressText.textContent = `Error: ${error.message}`;
                 progressBar.style.width = '0%';
             } finally {
                 generateBtn.disabled = false;
-                setTimeout(() => {
-                    progress.classList.add('hidden');
-                    progressBar.style.width = '0%';
-                }, 3000);
             }
         });
     </script>
