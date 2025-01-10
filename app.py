@@ -10,6 +10,7 @@ import json
 from datetime import datetime, timedelta
 from threading import Thread
 import logging
+import tempfile
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -21,7 +22,8 @@ app = Flask(__name__)
 if os.environ.get('VERCEL_ENV') == 'production':
     app.config['UPLOAD_FOLDER'] = '/tmp'
 elif os.environ.get('DIGITAL_OCEAN_APP') == 'true':
-    app.config['UPLOAD_FOLDER'] = '/app/uploads'
+    # Use system temp directory for DigitalOcean
+    app.config['UPLOAD_FOLDER'] = tempfile.gettempdir()
 else:
     app.config['UPLOAD_FOLDER'] = 'uploads'
 
@@ -29,8 +31,13 @@ app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
 app.config['VIDEO_LIFETIME'] = 3600  # 1 hour in seconds
 app.config['GENERATION_TIMEOUT'] = 120  # 2 minutes timeout for video generation
 
-# Ensure upload folder exists
-os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+# Ensure upload folder exists and has correct permissions
+try:
+    os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+    # Set directory permissions to 755
+    os.chmod(app.config['UPLOAD_FOLDER'], 0o755)
+except Exception as e:
+    logger.error(f"Error setting up upload folder: {str(e)}")
 
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg'}
 
@@ -44,15 +51,33 @@ def save_status(video_id, status_data):
         status_path = get_status_path(video_id)
         with open(status_path, 'w') as f:
             json.dump(status_data, f)
+        # Set file permissions to 644
+        os.chmod(status_path, 0o644)
     except Exception as e:
         logger.error(f"Error saving status: {str(e)}")
+        # Try alternate location if primary fails
+        try:
+            alt_path = os.path.join(tempfile.gettempdir(), f'status_{video_id}.json')
+            with open(alt_path, 'w') as f:
+                json.dump(status_data, f)
+            os.chmod(alt_path, 0o644)
+            return alt_path
+        except Exception as e2:
+            logger.error(f"Error saving status to alternate location: {str(e2)}")
 
 def get_status(video_id):
     """Get status from file"""
     try:
+        # Try primary location
         status_path = get_status_path(video_id)
         if os.path.exists(status_path):
             with open(status_path, 'r') as f:
+                return json.load(f)
+        
+        # Try alternate location
+        alt_path = os.path.join(tempfile.gettempdir(), f'status_{video_id}.json')
+        if os.path.exists(alt_path):
+            with open(alt_path, 'r') as f:
                 return json.load(f)
     except Exception as e:
         logger.error(f"Error reading status: {str(e)}")
@@ -61,9 +86,14 @@ def get_status(video_id):
 def cleanup_status_file(video_id):
     """Clean up status file"""
     try:
-        status_path = get_status_path(video_id)
-        if os.path.exists(status_path):
-            os.remove(status_path)
+        # Try both locations
+        paths = [
+            get_status_path(video_id),
+            os.path.join(tempfile.gettempdir(), f'status_{video_id}.json')
+        ]
+        for path in paths:
+            if os.path.exists(path):
+                os.remove(path)
     except Exception as e:
         logger.error(f"Error cleaning status file: {str(e)}")
 
@@ -170,21 +200,30 @@ def create_panning_video(image_path, video_id, effect='left', duration=25):
 def cleanup_old_files():
     """Clean up video files older than 1 hour"""
     current_time = time.time()
-    # Clean up video files
-    for file in glob.glob(os.path.join(app.config['UPLOAD_FOLDER'], '*.mp4')):
-        if current_time - os.path.getctime(file) > app.config['VIDEO_LIFETIME']:
-            try:
-                os.remove(file)
-            except:
-                pass
     
-    # Clean up status files
-    for file in glob.glob(os.path.join(app.config['UPLOAD_FOLDER'], 'status_*.json')):
-        if current_time - os.path.getctime(file) > app.config['VIDEO_LIFETIME']:
-            try:
-                os.remove(file)
-            except:
-                pass
+    def cleanup_directory(directory):
+        try:
+            # Clean up video files
+            for file in glob.glob(os.path.join(directory, '*.mp4')):
+                if current_time - os.path.getctime(file) > app.config['VIDEO_LIFETIME']:
+                    try:
+                        os.remove(file)
+                    except:
+                        pass
+            
+            # Clean up status files
+            for file in glob.glob(os.path.join(directory, 'status_*.json')):
+                if current_time - os.path.getctime(file) > app.config['VIDEO_LIFETIME']:
+                    try:
+                        os.remove(file)
+                    except:
+                        pass
+        except Exception as e:
+            logger.error(f"Error cleaning up directory {directory}: {str(e)}")
+    
+    # Clean up both primary and temporary directories
+    cleanup_directory(app.config['UPLOAD_FOLDER'])
+    cleanup_directory(tempfile.gettempdir())
 
 @app.route('/')
 def index():
@@ -290,6 +329,19 @@ def download(filename):
 def favicon():
     return send_from_directory(os.path.join(app.root_path, 'static'),
                              'favicon.ico', mimetype='image/vnd.microsoft.icon')
+
+@app.route('/health')
+def health_check():
+    """Health check endpoint"""
+    try:
+        # Test file write
+        test_file = os.path.join(app.config['UPLOAD_FOLDER'], 'test.txt')
+        with open(test_file, 'w') as f:
+            f.write('test')
+        os.remove(test_file)
+        return jsonify({'status': 'healthy', 'upload_folder': app.config['UPLOAD_FOLDER']})
+    except Exception as e:
+        return jsonify({'status': 'unhealthy', 'error': str(e)}), 500
 
 if __name__ == '__main__':
     debug_mode = os.environ.get('FLASK_ENV') == 'development'

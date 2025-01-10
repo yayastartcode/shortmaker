@@ -9,16 +9,35 @@ envVars:
   - key: PYTHONUNBUFFERED
     value: "true"
 
+name: slideshow-generator
 services:
   - name: web
-    github:
+    environment_slug: python
+    instance_count: 1
+    instance_size_slug: basic-xxs
+    git:
       branch: main
-      deploy_on_push: true
-    routes:
-      - path: /
-    envVars:
+      repo_clone_url: https://github.com/yourusername/slideshow-generator.git
+    envs:
       - key: DIGITAL_OCEAN_APP
         value: "true"
+      - key: FLASK_ENV
+        value: "production"
+      - key: PYTHONUNBUFFERED
+        value: "true"
+    run_command: gunicorn --timeout 180 --workers 2 --log-level debug app:app
+    http_port: 8080
+    routes:
+      - path: /
+    health_check:
+      http_path: /health
+      initial_delay_seconds: 10
+      period_seconds: 10
+      timeout_seconds: 5
+      success_threshold: 1
+      failure_threshold: 3
+    file_fs_mounted: true
+    instance_count: 1
 
 static_sites:
   - name: static
