@@ -1,5 +1,5 @@
 import os
-from flask import Flask, request, render_template, jsonify, send_file
+from flask import Flask, request, render_template, jsonify, send_file, send_from_directory
 from werkzeug.utils import secure_filename
 from moviepy.editor import ImageClip, CompositeVideoClip, ColorClip
 from PIL import Image
@@ -9,7 +9,15 @@ import glob
 from datetime import datetime, timedelta
 
 app = Flask(__name__)
-app.config['UPLOAD_FOLDER'] = 'uploads'
+
+# Configure upload folder based on environment
+if os.environ.get('VERCEL_ENV') == 'production':
+    app.config['UPLOAD_FOLDER'] = '/tmp'  # Use /tmp for Vercel
+elif os.environ.get('DIGITAL_OCEAN_APP') == 'true':
+    app.config['UPLOAD_FOLDER'] = '/app/uploads'  # Use persistent storage for DigitalOcean
+else:
+    app.config['UPLOAD_FOLDER'] = 'uploads'  # Local development
+
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
 app.config['VIDEO_LIFETIME'] = 3600  # 1 hour in seconds
 
@@ -200,5 +208,13 @@ def download(filename):
         download_name=filename
     )
 
+@app.route('/favicon.ico')
+def favicon():
+    return send_from_directory(os.path.join(app.root_path, 'static'),
+                             'favicon.ico', mimetype='image/vnd.microsoft.icon')
+
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    # Only use debug mode locally
+    debug_mode = os.environ.get('FLASK_ENV') == 'development'
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=debug_mode)
