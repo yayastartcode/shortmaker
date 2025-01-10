@@ -6,6 +6,7 @@ from PIL import Image
 import numpy as np
 import time
 import glob
+import json
 from datetime import datetime, timedelta
 from threading import Thread
 import logging
@@ -31,10 +32,40 @@ app.config['GENERATION_TIMEOUT'] = 120  # 2 minutes timeout for video generation
 # Ensure upload folder exists
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
-# Store video generation status
-video_status = {}
-
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg'}
+
+def get_status_path(video_id):
+    """Get path for status file"""
+    return os.path.join(app.config['UPLOAD_FOLDER'], f'status_{video_id}.json')
+
+def save_status(video_id, status_data):
+    """Save status to file"""
+    try:
+        status_path = get_status_path(video_id)
+        with open(status_path, 'w') as f:
+            json.dump(status_data, f)
+    except Exception as e:
+        logger.error(f"Error saving status: {str(e)}")
+
+def get_status(video_id):
+    """Get status from file"""
+    try:
+        status_path = get_status_path(video_id)
+        if os.path.exists(status_path):
+            with open(status_path, 'r') as f:
+                return json.load(f)
+    except Exception as e:
+        logger.error(f"Error reading status: {str(e)}")
+    return None
+
+def cleanup_status_file(video_id):
+    """Clean up status file"""
+    try:
+        status_path = get_status_path(video_id)
+        if os.path.exists(status_path):
+            os.remove(status_path)
+    except Exception as e:
+        logger.error(f"Error cleaning status file: {str(e)}")
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
@@ -43,7 +74,7 @@ def create_panning_video(image_path, video_id, effect='left', duration=25):
     try:
         logger.info(f"Starting video generation for {video_id}")
         # Update status to processing
-        video_status[video_id] = {'status': 'processing', 'progress': 0}
+        save_status(video_id, {'status': 'processing', 'progress': 0})
         
         video_width = 1080
         video_height = 1920
@@ -53,7 +84,6 @@ def create_panning_video(image_path, video_id, effect='left', duration=25):
             if img.mode != 'RGB':
                 img = img.convert('RGB')
             
-            # Calculate resize dimensions based on effect direction
             if effect in ['left', 'right']:
                 new_width = video_width * 2
                 new_height = int((video_height / video_width) * new_width)
@@ -66,13 +96,13 @@ def create_panning_video(image_path, video_id, effect='left', duration=25):
             img = img.resize(resize_dim, Image.Resampling.LANCZOS)
             temp_path = os.path.join(app.config['UPLOAD_FOLDER'], f'temp_{video_id}.jpg')
             img.save(temp_path)
-            video_status[video_id]['progress'] = 20
+            save_status(video_id, {'status': 'processing', 'progress': 20})
         
         # Create video clips
         image_clip = ImageClip(temp_path)
         bg_clip = ColorClip(size=(video_width, video_height), color=(0, 0, 0))
         bg_clip = bg_clip.set_duration(duration)
-        video_status[video_id]['progress'] = 40
+        save_status(video_id, {'status': 'processing', 'progress': 40})
         
         # Define position function based on effect
         if effect == 'left':
@@ -97,14 +127,14 @@ def create_panning_video(image_path, video_id, effect='left', duration=25):
                 return ('center', y)
         
         image_clip = image_clip.set_position(pos_func).set_duration(duration)
-        video_status[video_id]['progress'] = 60
+        save_status(video_id, {'status': 'processing', 'progress': 60})
         
         final_clip = CompositeVideoClip([bg_clip, image_clip])
-        video_status[video_id]['progress'] = 80
+        save_status(video_id, {'status': 'processing', 'progress': 80})
         
         output_path = os.path.join(app.config['UPLOAD_FOLDER'], f'output_{video_id}.mp4')
         final_clip.write_videofile(output_path, fps=30, codec='libx264', audio=False, logger=None)
-        video_status[video_id]['progress'] = 100
+        save_status(video_id, {'status': 'processing', 'progress': 100})
         
         # Clean up temp file
         try:
@@ -112,23 +142,30 @@ def create_panning_video(image_path, video_id, effect='left', duration=25):
         except:
             pass
         
-        video_status[video_id] = {'status': 'completed', 'output_path': output_path}
+        # Save completed status
+        save_status(video_id, {'status': 'completed', 'output_path': output_path})
         logger.info(f"Video generation completed for {video_id}")
         return output_path
     
     except Exception as e:
         logger.error(f"Error generating video for {video_id}: {str(e)}")
-        video_status[video_id] = {'status': 'error', 'error': str(e)}
+        save_status(video_id, {'status': 'error', 'error': str(e)})
         raise
 
 def cleanup_old_files():
     """Clean up video files older than 1 hour"""
     current_time = time.time()
+    # Clean up video files
     for file in glob.glob(os.path.join(app.config['UPLOAD_FOLDER'], '*.mp4')):
-        # Get file creation time
-        file_time = os.path.getctime(file)
-        # If file is older than 1 hour, delete it
-        if current_time - file_time > app.config['VIDEO_LIFETIME']:
+        if current_time - os.path.getctime(file) > app.config['VIDEO_LIFETIME']:
+            try:
+                os.remove(file)
+            except:
+                pass
+    
+    # Clean up status files
+    for file in glob.glob(os.path.join(app.config['UPLOAD_FOLDER'], 'status_*.json')):
+        if current_time - os.path.getctime(file) > app.config['VIDEO_LIFETIME']:
             try:
                 os.remove(file)
             except:
@@ -155,11 +192,7 @@ def upload_files():
         return jsonify({'error': 'Invalid effect selected'}), 400
     
     try:
-        # Generate unique ID for this video
         video_id = f"{int(time.time())}_{os.urandom(4).hex()}"
-        
-        # Save uploaded file
-        original_name = os.path.splitext(secure_filename(file.filename))[0]
         filepath = os.path.join(app.config['UPLOAD_FOLDER'], f'input_{video_id}.jpg')
         file.save(filepath)
         
@@ -169,7 +202,6 @@ def upload_files():
         thread.daemon = True
         thread.start()
         
-        # Return immediately with video ID
         return jsonify({
             'success': True,
             'video_id': video_id,
@@ -182,23 +214,23 @@ def upload_files():
 
 @app.route('/status/<video_id>')
 def check_status(video_id):
-    status = video_status.get(video_id, {})
-    if not status:
+    status_data = get_status(video_id)
+    if not status_data:
         return jsonify({'error': 'Video not found'}), 404
     
-    if status.get('status') == 'completed':
-        # Generate video filename
+    if status_data.get('status') == 'completed':
         video_filename = f"video_{video_id}.mp4"
         final_path = os.path.join(app.config['UPLOAD_FOLDER'], video_filename)
         
-        # Rename the output file
         try:
-            os.rename(status['output_path'], final_path)
+            os.rename(status_data['output_path'], final_path)
         except:
             pass
         
-        # Calculate expiration time
         expiry_time = datetime.now() + timedelta(seconds=app.config['VIDEO_LIFETIME'])
+        
+        # Clean up status file after completion
+        cleanup_status_file(video_id)
         
         return jsonify({
             'status': 'completed',
@@ -207,16 +239,19 @@ def check_status(video_id):
             'expires_at': expiry_time.strftime('%Y-%m-%d %H:%M:%S')
         })
     
-    elif status.get('status') == 'error':
+    elif status_data.get('status') == 'error':
+        error_message = status_data.get('error', 'Unknown error occurred')
+        # Clean up status file after error
+        cleanup_status_file(video_id)
         return jsonify({
             'status': 'error',
-            'error': status.get('error', 'Unknown error occurred')
+            'error': error_message
         })
     
     else:
         return jsonify({
             'status': 'processing',
-            'progress': status.get('progress', 0)
+            'progress': status_data.get('progress', 0)
         })
 
 @app.route('/download/<filename>')
