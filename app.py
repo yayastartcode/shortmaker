@@ -73,7 +73,6 @@ def allowed_file(filename):
 def create_panning_video(image_path, video_id, effect='left', duration=25):
     try:
         logger.info(f"Starting video generation for {video_id}")
-        # Update status to processing
         save_status(video_id, {'status': 'processing', 'progress': 0})
         
         video_width = 1080
@@ -84,13 +83,29 @@ def create_panning_video(image_path, video_id, effect='left', duration=25):
             if img.mode != 'RGB':
                 img = img.convert('RGB')
             
+            # Calculate aspect ratio
+            img_aspect = img.width / img.height
+            target_aspect = video_width / video_height
+            
             if effect in ['left', 'right']:
-                new_width = video_width * 2
-                new_height = int((video_height / video_width) * new_width)
+                # For left/right pan, maintain height and calculate width
+                new_height = video_height
+                new_width = int(new_height * img_aspect)
+                
+                # Ensure minimum width for panning
+                if new_width < video_width * 2:
+                    new_width = video_width * 2
+                
                 resize_dim = (new_width, new_height)
             else:  # up or down
-                new_height = video_height * 2
-                new_width = int((video_width / video_height) * new_height)
+                # For up/down pan, maintain width and calculate height
+                new_width = video_width
+                new_height = int(new_width / img_aspect)
+                
+                # Ensure minimum height for panning
+                if new_height < video_height * 2:
+                    new_height = video_height * 2
+                
                 resize_dim = (new_width, new_height)
             
             img = img.resize(resize_dim, Image.Resampling.LANCZOS)
@@ -108,22 +123,22 @@ def create_panning_video(image_path, video_id, effect='left', duration=25):
         if effect == 'left':
             def pos_func(t):
                 progress = t / duration
-                x = video_width - (progress * video_width)
+                x = (new_width - video_width) - (progress * (new_width - video_width))
                 return (x, 'center')
         elif effect == 'right':
             def pos_func(t):
                 progress = t / duration
-                x = -video_width + (progress * video_width)
+                x = -(progress * (new_width - video_width))
                 return (x, 'center')
         elif effect == 'up':
             def pos_func(t):
                 progress = t / duration
-                y = video_height - (progress * video_height)
+                y = (new_height - video_height) - (progress * (new_height - video_height))
                 return ('center', y)
         else:  # down
             def pos_func(t):
                 progress = t / duration
-                y = -video_height + (progress * video_height)
+                y = -(progress * (new_height - video_height))
                 return ('center', y)
         
         image_clip = image_clip.set_position(pos_func).set_duration(duration)
