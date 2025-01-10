@@ -34,7 +34,7 @@ def cleanup_old_files():
             except:
                 pass
 
-def create_panning_video(image_path, duration=25):
+def create_panning_video(image_path, duration=25, effect='left'):
     # Run cleanup before creating new video
     cleanup_old_files()
     
@@ -42,71 +42,79 @@ def create_panning_video(image_path, duration=25):
     video_width = 1080
     video_height = 1920
     
-    # Load and process the image
-    img = Image.open(image_path)
-    
-    # Calculate dimensions for the enlarged image
-    aspect_ratio = img.width / img.height
-    enlarged_width = int(video_width * 2)  # Make image 2x wider than video frame
-    enlarged_height = int(enlarged_width / aspect_ratio)
-    
-    # Ensure the image is tall enough
-    if enlarged_height < video_height:
-        enlarged_height = video_height
-        enlarged_width = int(enlarged_height * aspect_ratio)
-    
-    # Resize image using Lanczos resampling
-    img = img.resize((enlarged_width, enlarged_height), Image.Resampling.LANCZOS)
-    
-    # Convert to RGB mode if necessary
-    if img.mode in ('RGBA', 'P'):
-        img = img.convert('RGB')
-    
-    # Save the resized image as a temporary file
-    temp_img_path = os.path.join(app.config['UPLOAD_FOLDER'], 'temp_resized.jpg')
-    img.save(temp_img_path, quality=95)
-    
-    # Create a black background clip
-    bg_clip = ColorClip(size=(video_width, video_height), 
-                       color=(0, 0, 0), 
-                       duration=duration)
-    
-    # Create the image clip
-    clip = ImageClip(temp_img_path)
-    
-    def get_frame_position(t):
-        # Calculate position for smooth panning from right to left
-        progress = t / duration
+    # Open and process image
+    with Image.open(image_path) as img:
+        # Convert to RGB if necessary
+        if img.mode != 'RGB':
+            img = img.convert('RGB')
         
-        # Start position (right side)
-        x_start = -(enlarged_width - video_width)
-        # End position (left side)
-        x_end = 0
+        # Calculate resize dimensions based on effect direction
+        if effect in ['left', 'right']:
+            # For horizontal panning, make image 2x wider
+            new_width = video_width * 2
+            new_height = int((video_height / video_width) * new_width)
+            resize_dim = (new_width, new_height)
+        else:  # up or down
+            # For vertical panning, make image 2x taller
+            new_height = video_height * 2
+            new_width = int((video_width / video_height) * new_height)
+            resize_dim = (new_width, new_height)
         
-        # Linear interpolation from start to end position
-        x = x_start + (x_end - x_start) * progress
+        # Resize image
+        img = img.resize(resize_dim, Image.Resampling.LANCZOS)
         
-        # Center vertically
-        y = (video_height - enlarged_height) // 2
-        
-        return (int(x), int(y))
+        # Save temporary file
+        temp_path = os.path.join(app.config['UPLOAD_FOLDER'], 'temp_resized.jpg')
+        img.save(temp_path)
     
-    # Create the moving clip
-    moving_clip = (clip
-                  .set_duration(duration)
-                  .set_position(get_frame_position))
+    # Create video clips
+    image_clip = ImageClip(temp_path)
     
-    # Combine clips and crop to final size
-    final_clip = (CompositeVideoClip([bg_clip, moving_clip])
+    # Create a black background
+    bg_clip = ColorClip(size=(video_width, video_height), color=(0, 0, 0))
+    bg_clip = bg_clip.set_duration(duration)
+    
+    # Define position function based on effect
+    if effect == 'left':
+        def pos_func(t):
+            # Move from right to left
+            progress = t / duration
+            x = video_width - (progress * video_width)
+            return (x, 'center')
+    elif effect == 'right':
+        def pos_func(t):
+            # Move from left to right
+            progress = t / duration
+            x = -video_width + (progress * video_width)
+            return (x, 'center')
+    elif effect == 'up':
+        def pos_func(t):
+            # Move from bottom to top
+            progress = t / duration
+            y = video_height - (progress * video_height)
+            return ('center', y)
+    else:  # down
+        def pos_func(t):
+            # Move from top to bottom
+            progress = t / duration
+            y = -video_height + (progress * video_height)
+            return ('center', y)
+    
+    # Set clip properties
+    image_clip = (image_clip
+                 .set_position(pos_func)
                  .set_duration(duration))
     
-    # Write to output file
-    output_path = os.path.join(app.config['UPLOAD_FOLDER'], 'output.mp4')
-    final_clip.write_videofile(output_path, fps=30, codec='libx264')
+    # Combine clips
+    final_clip = CompositeVideoClip([bg_clip, image_clip])
     
-    # Clean up temporary files
+    # Write output file
+    output_path = os.path.join(app.config['UPLOAD_FOLDER'], 'output.mp4')
+    final_clip.write_videofile(output_path, fps=30, codec='libx264', audio=False)
+    
+    # Clean up
     try:
-        os.remove(temp_img_path)
+        os.remove(temp_path)
     except:
         pass
     
@@ -125,23 +133,27 @@ def upload_files():
     
     files = request.files.getlist('files[]')
     file = files[0] if files else None
+    effect = request.form.get('effect', 'left')  # Get selected effect, default to left
     
     if not file or not allowed_file(file.filename):
         return jsonify({'error': 'Please upload a valid image file'}), 400
     
+    if effect not in ['left', 'right', 'up', 'down']:
+        return jsonify({'error': 'Invalid effect selected'}), 400
+    
     try:
         # Get original filename without extension
         original_name = os.path.splitext(secure_filename(file.filename))[0]
-        # Create video filename with timestamp
-        video_filename = f"{original_name}_video_{int(time.time())}.mp4"
+        # Create video filename with timestamp and effect
+        video_filename = f"{original_name}_{effect}_video_{int(time.time())}.mp4"
         
         filepath = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(file.filename))
         file.save(filepath)
         
-        # Create video with panning effect
-        output_path = create_panning_video(filepath)
+        # Create video with selected panning effect
+        output_path = create_panning_video(filepath, effect=effect)
         
-        # Rename the output file to include the original filename
+        # Rename the output file to include the original filename and effect
         final_path = os.path.join(app.config['UPLOAD_FOLDER'], video_filename)
         os.rename(output_path, final_path)
         
